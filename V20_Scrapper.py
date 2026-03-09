@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 # --- 1. KONFIGURASI HALAMAN ---
-st.set_page_config(page_title="SPSE Scraper V25", page_icon="🏗️", layout="wide")
+st.set_page_config(page_title="SPSE Scraper V1.a", page_icon="🏗️", layout="wide")
 
 st.markdown("""
     <style>
@@ -30,19 +30,18 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 STOP_FILE = "stop_signal.txt"
 
 # --- PENTING: MAPPING NAMA TABEL DI SINI ---
-# Pastikan nama tabel di Supabase kamu sesuai dengan yang ada di kanan (nilai dict)
 CONFIG_KATEGORI = {
     "Tender": {
-        "tabel": "tender",        # Nama tabel di Supabase
-        "endpoint": "lelang"      # URL di website SPSE
+        "tabel": "tender",
+        "endpoint": "lelang"
     },
     "Non Tender": {
-        "tabel": "non_tender",    # Nama tabel di Supabase (biasanya pake underscore)
-        "endpoint": "nontender"   # URL di website SPSE
+        "tabel": "non_tender",
+        "endpoint": "nontender"
     },
     "Pencatatan": {
-        "tabel": "pencatatan",    # Nama tabel di Supabase
-        "endpoint": "pencatatan"  # URL di website SPSE
+        "tabel": "pencatatan",
+        "endpoint": "pencatatan"
     }
 }
 
@@ -76,7 +75,6 @@ def toggle_all():
         st.session_state[f"chk_{lpse['kode']}"] = state
 
 def get_last_update(kode_lpse, kategori_selected):
-    # Ambil nama tabel target berdasarkan pilihan user
     nama_tabel = CONFIG_KATEGORI[kategori_selected]["tabel"]
     
     try:
@@ -99,39 +97,43 @@ def get_last_update(kode_lpse, kategori_selected):
     except: return "-"
 
 # --- 4. ENGINE SCRAPING (MULTI-TABLE) ---
-def create_driver():
+def create_driver(headless=False):
     options = Options()
-    options.add_argument("--start-maximized")
+    if headless:
+        options.add_argument("--headless=new")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
+    else:
+        options.add_argument("--start-maximized")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
     return webdriver.Chrome(options=options)
 
-def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client):
+def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client, headless=False):
     if os.path.exists(STOP_FILE): return "⛔ Dibatalkan"
 
-    # AMBIL CONFIG BERDASARKAN KATEGORI
     config = CONFIG_KATEGORI[kategori_pilihan]
     nama_tabel_target = config["tabel"]
     endpoint_target = config["endpoint"]
 
-    driver = create_driver()
+    driver = None
     nama_lpse = target["nama"]
     kode_lpse = target["kode"]
-    wait = WebDriverWait(driver, 15)
-    
-    # URL Dinamis
+
     url = f"https://spse.inaproc.id/{kode_lpse}/{endpoint_target}?tahun={tahun_pilihan}"
-    
+
     try:
+        driver = create_driver(headless=headless)
+        wait = WebDriverWait(driver, 15)
         driver.get(url)
         time.sleep(4)
-        
+
         halaman = 1
         paket_counter = 0
         halaman_kosong = 0
-        
+
         while True:
-            if os.path.exists(STOP_FILE): driver.quit(); return f"🛑 {nama_lpse}: STOP"
+            if os.path.exists(STOP_FILE): return f"🛑 {nama_lpse}: STOP"
 
             try:
                 driver.switch_to.window(driver.window_handles[0])
@@ -142,10 +144,11 @@ def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client):
             paket_ditemukan = False
             
             for i, row in enumerate(rows):
-                if os.path.exists(STOP_FILE): driver.quit(); return "STOP"
+                if os.path.exists(STOP_FILE): return "STOP"
 
                 try:
-                    if "data-td-text" in row.get_attribute("class"): continue
+                    row_class = row.get_attribute("class") or ""
+                    if "data-td-text" in row_class: continue
                     links = row.find_elements(By.TAG_NAME, "a")
                     if len(links) == 0: continue 
                     
@@ -197,10 +200,11 @@ def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client):
                     alamat = "-"
                     harga_kontrak = "0"
 
-                    # Logic Pemenang (Dinamis: Cek dulu apakah tabnya ada, baru klik)
+                    # Logic Pemenang (exact match to avoid matching 'Pemenang Berkontrak')
                     try:
-                        if len(driver.find_elements(By.XPATH, "//a[contains(text(), 'Pemenang')]")) > 0:
-                            wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Pemenang')]"))).click()
+                        pemenang_tabs = driver.find_elements(By.XPATH, "//a[text()='Pemenang']")
+                        if len(pemenang_tabs) > 0:
+                            wait.until(EC.element_to_be_clickable((By.XPATH, "//a[text()='Pemenang']"))).click()
                             wait.until(EC.presence_of_element_located((By.XPATH, "//*[@id='main']/div/table")))
                             try:
                                 elemen_td = driver.find_element(By.XPATH, "//*[@id='main']/div/table/tbody/tr[7]/td/table/tbody/tr[2]/td[1]")
@@ -236,7 +240,6 @@ def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client):
                     except:
                         kontrak_mulai, kontrak_selesai = "-", "-"
                     finally:
-                        # Tutup semua tab kecuali tab utama
                         while len(driver.window_handles) > 1:
                             driver.switch_to.window(driver.window_handles[-1])
                             driver.close()
@@ -255,7 +258,6 @@ def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client):
                         "diambil_pada": datetime.now().isoformat()
                     }
                     
-                    # === DISIMPAN KE TABEL SESUAI KATEGORI ===
                     supabase_client.table(nama_tabel_target).upsert(data).execute()
                     paket_counter += 1
                     
@@ -273,21 +275,22 @@ def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client):
             
             try:
                 next_btn = driver.find_element(By.XPATH, "//a[contains(text(),'Berikutnya')] | //a[contains(@class,'next')]")
-                if "disabled" in next_btn.get_attribute("class"): break
+                if "disabled" in (next_btn.get_attribute("class") or ""): break
                 next_btn.click()
                 halaman += 1
                 time.sleep(3)
             except: break
         
-        driver.quit()
         return f"{nama_lpse}: Selesai {paket_counter} Data ({kategori_pilihan})"
 
     except Exception as e:
-        driver.quit()
         return f"❌ {nama_lpse}: Error Sistem"
+    finally:
+        if driver:
+            driver.quit()
 
 # --- 5. UI ---
-st.title("🏗️ SPSE Scraper V25 (Multi-Table)")
+st.title("🏗️ SPSE Scraper V1.a (Multi-Table)")
 
 # Bagian Kontrol
 col_thn, col_kat = st.columns([1, 2])
@@ -297,14 +300,12 @@ with col_thn:
     tahun_input = st.number_input("Tahun", min_value=2020, max_value=2030, value=tahun_sekarang)
 
 with col_kat:
-    # Selector Kategori
     kategori_input = st.radio("Kategori (Target Tabel)", ["Tender", "Non Tender", "Pencatatan"], horizontal=True)
 
 st.write("---")
 c1, c2, c3 = st.columns([0.5, 4, 3])
 c1.checkbox("", key="chk_all", on_change=toggle_all)
 c2.markdown("**DAERAH**")
-# Header tabel dinamis
 c3.markdown(f"**LAST UPDATE (Tabel: {CONFIG_KATEGORI[kategori_input]['tabel']})**")
 
 target_dipilih = []
@@ -316,10 +317,15 @@ with st.container():
             if col_a.checkbox("", key=f"chk_{lpse['kode']}"): target_dipilih.append(lpse)
         with col_b: st.markdown(f"{lpse['nama']}")
         with col_c: 
-            # Status update menyesuaikan kategori yang dipilih
             st.markdown(get_last_update(lpse['kode'], kategori_input))
 
 st.write("---")
+col_opts1, col_opts2 = st.columns(2)
+with col_opts1:
+    headless_mode = st.checkbox("🖥️ Headless Mode (tanpa buka browser)", value=True)
+with col_opts2:
+    max_workers_input = st.slider("Parallel Workers", min_value=1, max_value=5, value=2)
+
 c_start, c_stop = st.columns([4, 1])
 
 with c_start:
@@ -330,8 +336,8 @@ with c_start:
         else:
             status_box = st.status(f"Menghisap data ke tabel: **{CONFIG_KATEGORI[kategori_input]['tabel']}**...", expanded=True)
             p_bar = status_box.progress(0)
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                futures = [executor.submit(scrape_satu_lpse, t, tahun_input, kategori_input, supabase) for t in target_dipilih]
+            with ThreadPoolExecutor(max_workers=max_workers_input) as executor:
+                futures = [executor.submit(scrape_satu_lpse, t, tahun_input, kategori_input, supabase, headless_mode) for t in target_dipilih]
                 done = 0
                 for f in futures:
                     res = f.result()
