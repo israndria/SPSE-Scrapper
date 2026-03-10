@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 # --- 1. KONFIGURASI HALAMAN ---
-st.set_page_config(page_title="SPSE Scraper V1.b", page_icon="🏗️", layout="wide")
+st.set_page_config(page_title="SPSE Scraper V1.c", page_icon="🏗️", layout="wide")
 
 st.markdown("""
     <style>
@@ -113,21 +113,8 @@ def get_last_update(kode_lpse, kategori_selected):
         return "⚪ Kosong"
     except: return "-"
 
-def get_scraped_today(kode_lpse, nama_tabel):
-    """Ambil daftar kode_tender yang sudah di-scrape hari ini untuk skip"""
-    try:
-        today_utc = (datetime.now() - timedelta(hours=7)).strftime("%Y-%m-%dT00:00:00")
-        response = supabase.table(nama_tabel) \
-            .select('kode_tender') \
-            .ilike('link_detail', f'%{kode_lpse}%') \
-            .gte('diambil_pada', today_utc) \
-            .execute()
-        return {r['kode_tender'] for r in response.data}
-    except:
-        return set()
-
 # --- 4. ENGINE SCRAPING (MULTI-TABLE) ---
-def create_driver(headless=False):
+def create_driver(headless=False, minimize=False):
     options = Options()
     if headless:
         options.add_argument("--headless=new")
@@ -137,9 +124,12 @@ def create_driver(headless=False):
         options.add_argument("--start-maximized")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
-    return webdriver.Chrome(options=options)
+    driver = webdriver.Chrome(options=options)
+    if minimize and not headless:
+        driver.minimize_window()
+    return driver
 
-def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client, headless=False, skip_today=False):
+def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client, headless=False, minimize=False):
     if os.path.exists(STOP_FILE): return "⛔ Dibatalkan"
 
     config = CONFIG_KATEGORI[kategori_pilihan]
@@ -150,17 +140,14 @@ def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client, h
     nama_lpse = target["nama"]
     kode_lpse = target["kode"]
 
-    # Ambil daftar paket yang sudah di-scrape hari ini
-    sudah_scrape = get_scraped_today(kode_lpse, nama_tabel_target) if skip_today else set()
-
     url = f"https://spse.inaproc.id/{kode_lpse}/{endpoint_target}?tahun={tahun_pilihan}"
-    log.info(f"Mulai scrape: {nama_lpse} ({kategori_pilihan}) | skip_today={skip_today}, cached={len(sudah_scrape)}")
+    log.info(f"Mulai scrape: {nama_lpse} ({kategori_pilihan})")
 
     MAX_RETRY = 2
     for attempt in range(MAX_RETRY + 1):
       try:
         if driver: driver.quit(); driver = None
-        driver = create_driver(headless=headless)
+        driver = create_driver(headless=headless, minimize=minimize)
         wait = WebDriverWait(driver, 15)
         driver.get(url)
         time.sleep(4)
@@ -178,7 +165,6 @@ def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client, h
 
         halaman = 1
         paket_counter = 0
-        skip_counter = 0
         error_counter = 0
         halaman_kosong = 0
 
@@ -211,12 +197,6 @@ def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client, h
                     link_detail = link_elem.get_attribute("href")
                     
                     if not nama_paket: continue
-
-                    # Skip paket yang sudah di-scrape hari ini
-                    if kode_tender in sudah_scrape:
-                        skip_counter += 1
-                        paket_ditemukan = True
-                        continue
 
                     instansi = cols[2].text.strip() if len(cols) > 2 else "-"
                     tahapan = cols[3].text.strip() if len(cols) > 3 else "-"
@@ -341,8 +321,7 @@ def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client, h
                 time.sleep(3)
             except: break
         
-        msg = f"{nama_lpse}: ✅ {paket_counter} baru"
-        if skip_counter: msg += f", ⏭️ {skip_counter} skip"
+        msg = f"{nama_lpse}: ✅ {paket_counter} data"
         if error_counter: msg += f", ⚠️ {error_counter} error"
         log.info(msg)
         return msg
@@ -361,7 +340,7 @@ def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client, h
     return f"❌ {nama_lpse}: Gagal setelah {MAX_RETRY} retry"
 
 # --- 5. UI ---
-st.title("🏗️ SPSE Scraper V1.b (Multi-Table)")
+st.title("🏗️ SPSE Scraper V1.c (Multi-Table)")
 
 # Bagian Kontrol
 col_thn, col_kat = st.columns([1, 2])
@@ -398,7 +377,7 @@ col_opts1, col_opts2, col_opts3 = st.columns(3)
 with col_opts1:
     headless_mode = st.checkbox("🖥️ Headless (SPSE mungkin blokir)", value=False)
 with col_opts2:
-    skip_today_mode = st.checkbox("⏭️ Skip yang sudah di-scrape hari ini", value=True)
+    minimize_mode = st.checkbox("🔽 Minimize Chrome", value=True)
 with col_opts3:
     max_workers_input = st.slider("Parallel Workers", min_value=1, max_value=5, value=2)
 
@@ -413,7 +392,7 @@ with c_start:
             status_box = st.status(f"Menghisap data ke tabel: **{CONFIG_KATEGORI[kategori_input]['tabel']}**...", expanded=True)
             p_bar = status_box.progress(0)
             with ThreadPoolExecutor(max_workers=max_workers_input) as executor:
-                futures = [executor.submit(scrape_satu_lpse, t, tahun_input, kategori_input, supabase, headless_mode, skip_today_mode) for t in target_dipilih]
+                futures = [executor.submit(scrape_satu_lpse, t, tahun_input, kategori_input, supabase, headless_mode, minimize_mode) for t in target_dipilih]
                 done = 0
                 for f in futures:
                     res = f.result()
