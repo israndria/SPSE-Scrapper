@@ -120,14 +120,15 @@ def create_driver(headless=False, minimize=False):
         options.add_argument("--headless=new")
         options.add_argument("--disable-gpu")
         options.add_argument("--window-size=1920,1080")
+    elif minimize:
+        # Off-screen: Chrome tidak pernah muncul di layar
+        options.add_argument("--window-position=-2400,-2400")
+        options.add_argument("--window-size=1920,1080")
     else:
         options.add_argument("--start-maximized")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
-    driver = webdriver.Chrome(options=options)
-    if minimize and not headless:
-        driver.minimize_window()
-    return driver
+    return webdriver.Chrome(options=options)
 
 def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client, headless=False, minimize=False):
     if os.path.exists(STOP_FILE): return "⛔ Dibatalkan"
@@ -139,6 +140,12 @@ def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client, h
     driver = None
     nama_lpse = target["nama"]
     kode_lpse = target["kode"]
+
+    def keep_minimized():
+        """Re-minimize Chrome setelah switch_to agar tidak muncul ke depan"""
+        if minimize and not headless:
+            try: driver.minimize_window()
+            except: pass
 
     url = f"https://spse.inaproc.id/{kode_lpse}/{endpoint_target}?tahun={tahun_pilihan}"
     log.info(f"Mulai scrape: {nama_lpse} ({kategori_pilihan})")
@@ -173,6 +180,7 @@ def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client, h
 
             try:
                 driver.switch_to.window(driver.window_handles[0])
+                keep_minimized()
                 wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table.table")))
                 rows = driver.find_elements(By.CSS_SELECTOR, "table.table tbody tr")
             except: break 
@@ -206,6 +214,7 @@ def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client, h
                     # Buka Detail
                     driver.execute_script("window.open(arguments[0]);", link_detail)
                     driver.switch_to.window(driver.window_handles[-1])
+                    keep_minimized()
                     
                     # Logic Ambil Data Detail
                     jenis_pengadaan = "-"
@@ -266,6 +275,7 @@ def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client, h
                     try:
                         driver.execute_script("window.open(arguments[0]);", f"https://spse.inaproc.id/{kode_lpse}/{endpoint_target}/{kode_tender}/jadwal")
                         driver.switch_to.window(driver.window_handles[-1])
+                        keep_minimized()
                         wait.until(EC.presence_of_element_located((By.XPATH, "//table")))
                         rows_jadwal = driver.find_elements(By.XPATH, "//table/tbody/tr")
                         for tr in rows_jadwal:
@@ -281,6 +291,7 @@ def scrape_satu_lpse(target, tahun_pilihan, kategori_pilihan, supabase_client, h
                             driver.switch_to.window(driver.window_handles[-1])
                             driver.close()
                         driver.switch_to.window(driver.window_handles[0])
+                        keep_minimized()
 
                     # DATA UNTUK DISIMPAN
                     data = {
